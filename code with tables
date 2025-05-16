@@ -193,4 +193,4 @@ void kill_process_prompt() {
     getch();
     noecho();
     curs_set(0);
-}
+ }
