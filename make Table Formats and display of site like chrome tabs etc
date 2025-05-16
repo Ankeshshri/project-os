@@ -1,0 +1,196 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <ctype.h>
+#include <sys/types.h>
+#include <pwd.h>
+#include <ncurses.h>
+#include <signal.h>
+
+#define MAX_PROCESSES 1024
+#define MAX_PATH 1024
+#define MAX_LINE 256
+
+typedef struct {
+    int pid;
+    char name[MAX_PATH];
+    char state;
+    char username[32];
+    long memory_usage;
+} Process;
+
+Process gui_apps[MAX_PROCESSES];
+Process other_apps[MAX_PROCESSES];
+int gui_count = 0;
+int other_count = 0;
+
+const char* gui_app_list[] = {"chrome", "firefox", "brave", "code", "vscode", "telegram-desktop", "discord", "spotify", "nautilus", "gimp"};
+int gui_list_size = sizeof(gui_app_list) / sizeof(gui_app_list[0]);
+
+WINDOW *gui_win, *other_win;
+
+void get_processes();
+void get_process_info(int pid, Process *process);
+int is_gui_app(const char *name);
+void display_windows();
+void kill_process_prompt();
+
+int main() {
+    initscr();
+    noecho();
+    cbreak();
+    curs_set(0);
+    keypad(stdscr, TRUE);
+    start_color();
+    init_pair(1, COLOR_GREEN, COLOR_BLACK);
+    init_pair(2, COLOR_CYAN, COLOR_BLACK);
+
+    int height = LINES / 2;
+    int width = COLS;
+
+    gui_win = newwin(height, width, 1, 0);
+    other_win = newwin(LINES - height - 2, width, height + 2, 0);
+
+    while (1) {
+        clear();
+        mvprintw(0, 0, "Process Monitor | Press 'q' to quit | Press 'k' to kill a process");
+        box(gui_win, 0, 0);
+        mvwprintw(gui_win, 0, 2, " GUI Applications ");
+        box(other_win, 0, 0);
+        mvwprintw(other_win, 0, 2, " Other Processes ");
+
+        get_processes();
+        display_windows();
+
+        refresh();
+        wrefresh(gui_win);
+        wrefresh(other_win);
+
+        int ch = getch();
+        if (ch == 'q' || ch == 'Q') break;
+        else if (ch == 'k' || ch == 'K') kill_process_prompt();
+
+        sleep(1);
+    }
+
+    endwin();
+    return 0;
+}
+
+void get_processes() {
+    DIR *dir = opendir("/proc");
+    struct dirent *entry;
+    gui_count = 0;
+    other_count = 0;
+
+    if (!dir) {
+        perror("/proc");
+        exit(1);
+    }
+
+    while ((entry = readdir(dir)) != NULL && (gui_count + other_count) < MAX_PROCESSES) {
+        if (entry->d_type == DT_DIR && isdigit(entry->d_name[0])) {
+            int pid = atoi(entry->d_name);
+            Process p;
+            get_process_info(pid, &p);
+            if (p.memory_usage > 0) {
+                if (is_gui_app(p.name)) {
+                    gui_apps[gui_count++] = p;
+                } else {
+                    other_apps[other_count++] = p;
+                }
+            }
+        }
+    }
+    closedir(dir);
+}
+
+int is_gui_app(const char *name) {
+    for (int i = 0; i < gui_list_size; i++) {
+        if (strstr(name, gui_app_list[i]) != NULL) return 1;
+    }
+    return 0;
+}
+
+void get_process_info(int pid, Process *process) {
+    char path[MAX_PATH], line[MAX_LINE];
+    FILE *file;
+
+    process->pid = pid;
+    strcpy(process->name, "unknown");
+    process->state = '?';
+    strcpy(process->username, "unknown");
+    process->memory_usage = 0;
+
+    //snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+    file = fopen(path, "r");
+    if (file) {
+        if (fgets(line, sizeof(line), file)) {
+            line[strcspn(line, "\n")] = 0;
+            strncpy(process->name, line, sizeof(process->name) - 1);
+        }
+        fclose(file);
+    }
+
+    snprintf(path, sizeof(path), "/proc/%d/status", pid);
+    file = fopen(path, "r");
+    if (file) {
+        while (fgets(line, sizeof(line), file)) {
+            if (strncmp(line, "Uid:", 4) == 0) {
+                int uid;
+                sscanf(line, "Uid:\t%d", &uid);
+                struct passwd *pw = getpwuid(uid);
+                if (pw) strncpy(process->username, pw->pw_name, sizeof(process->username) - 1);
+            }
+            if (strncmp(line, "VmRSS:", 6) == 0) {
+                long mem;
+                sscanf(line, "VmRSS: %ld", &mem);
+                process->memory_usage = mem;
+            }
+            if (strncmp(line, "State:", 6) == 0) {
+                //sscanf(line, "State:\t%c", &process->state);
+            }
+        }
+        fclose(file);
+    }
+}
+
+void display_windows() {
+    // GUI processes
+    mvwprintw(gui_win, 1, 1, "%-6s %-20s %-10s %-8s %-6s", "PID", "NAME", "USER", "MEM(KB)", "STATE");
+    for (int i = 0; i < gui_count && i < getmaxy(gui_win) - 3; i++) {
+        wattron(gui_win, COLOR_PAIR(1));
+        mvwprintw(gui_win, i + 2, 1, "%-6d %-20s %-10s %-8ld %-6c",
+                  gui_apps[i].pid, gui_apps[i].name, gui_apps[i].username,
+                  gui_apps[i].memory_usage, gui_apps[i].state);
+        wattroff(gui_win, COLOR_PAIR(1));
+    }
+
+    // Other processes
+    mvwprintw(other_win, 1, 1, "%-6s %-20s %-10s %-8s %-6s", "PID", "NAME", "USER", "MEM(KB)", "STATE");
+    for (int i = 0; i < other_count && i < getmaxy(other_win) - 3; i++) {
+        wattron(other_win, COLOR_PAIR(2));
+        mvwprintw(other_win, i + 2, 1, "%-6d %-20s %-10s %-8ld %-6c",
+                  other_apps[i].pid, other_apps[i].name, other_apps[i].username,
+                  other_apps[i].memory_usage, other_apps[i].state);
+        wattroff(other_win, COLOR_PAIR(2));
+    }
+}
+
+void kill_process_prompt() {
+    echo();
+    curs_set(1);
+    int pid;
+    mvprintw(LINES - 2, 0, "Enter PID to kill: ");
+    scanw("%d", &pid);
+    if (kill(pid, SIGKILL) == 0) {
+        mvprintw(LINES - 1, 0, "Process %d killed. Press any key to continue.", pid);
+    } else {
+        mvprintw(LINES - 1, 0, "Failed to kill process %d. Press any key to continue.", pid);
+    }
+    getch();
+    noecho();
+    curs_set(0);
+}
